@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+{{ script_name }}
+Relius → Frp ETL — EXTRACT phase
+Domain : {{ domain_name }}
+Format : {{ output_format | upper }}
+Encoding: {{ encoding }}
+Generated: {{ generated_at }}
+Engagement: {{ engagement_id }}
+
+DO NOT EDIT — regenerate via MigrateIQ ETL Generation screen.
+"""
+import csv
+import json
+import logging
+import os
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Iterator, Optional
+
+{% if output_format == "fixed" %}
+# Fixed-length format spec
+FFL_SPEC = {{ ffl_spec | tojson(indent=2) }}
+{% endif %}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("migrateiq.extract.{{ domain_id }}")
+
+
+# ── Connection ────────────────────────────────────────────────
+def get_relius_connection():
+    """Return a Relius DB connection. Reads from environment."""
+    import sqlalchemy
+    url = os.environ.get("RELIUS_DB_URL")
+    if not url:
+        raise RuntimeError("RELIUS_DB_URL environment variable not set")
+    engine = sqlalchemy.create_engine(url, echo=False)
+    return engine.connect()
+
+
+# ── Extract queries ───────────────────────────────────────────
+EXTRACT_QUERIES: dict[str, str] = {
+{% for table in tables %}
+    "{{ table.name }}": """
+        SELECT
+{% for field in table.fields %}
+            {{ field.src_field }}{% if not loop.last %},{% endif %}  -- → {{ field.tgt_field }}
+{% endfor %}
+        FROM {{ table.name }}
+{% if table.where_clause %}
+        WHERE {{ table.where_clause }}
+{% endif %}
+        ORDER BY {% for pk in table.pk_fields %}{{ pk }}{% if not loop.last %}, {% endif %}{% endfor %}
+    """,
+{% endfor %}
+}
+
+
+# ── Row transformer ───────────────────────────────────────────
+def transform_row(table_name: str, row: dict) -> dict:
+    """
+    Apply field-level transforms for the given table.
+    Each transform was approved by an SME in the MigrateIQ mapping screen.
+    """
+    out = {}
+{% for table in tables %}
+    if table_name == "{{ table.name }}":
+{% for field in table.fields %}
+{% if field.transform_rule %}
+        # {{ field.src_field }} → {{ field.tgt_field }} | {{ field.mapping_type }}
+        # Rule: {{ field.transform_rule }}
+        out["{{ field.tgt_field }}"] = _apply_rule(row.get("{{ field.src_field }}"), {{ field.transform_rule | tojson }})
+{% elif field.is_constant %}
+        out["{{ field.tgt_field }}"] = {{ field.constant_value | tojson }}  # constant
+{% elif field.is_multi_source %}
+        # Composite: {{ field.multi_sources | join(', ', attribute='field') }} → {{ field.tgt_field }}
+        parts = [str(row.get(s.get("field",""), "") or "") for s in {{ field.multi_sources | tojson }}]
+        out["{{ field.tgt_field }}"] = " ".join(p for p in parts if p).strip()
+{% else %}
+        out["{{ field.tgt_field }}"] = row.get("{{ field.src_field }}")  # direct
+{% endif %}
+{% endfor %}
+        return out
+{% endfor %}
+    return out
+
+
+def _apply_rule(value, rule: str):
+    """
+    Execute a transform rule string.
+    Rules are simple Python expressions; value is the input.
+    Example rules: 'value.strip()' | 'value[:10]' | crosswalk lookups
+    """
+    if value is None:
+        return {{ null_indicator | tojson }}
+    try:
+        return eval(rule, {"value": value, "str": str, "int": int, "float": float})  # noqa: S307
+    except Exception as exc:
+        log.warning("transform_rule_error", extra={"rule": rule, "error": str(exc)})
+        return value
+
+
+# ── Output writers ────────────────────────────────────────────
+{% if output_format == "fixed" %}
+def write_fixed_length(rows: list[dict], tgt_field_order: list[str], out_path: Path) -> int:
+    """Write rows as fixed-length flat file per FFL spec."""
+    count = 0
+    with open(out_path, "w", encoding="{{ encoding }}", newline="\r\n") as f:
+        for row in rows:
+            line_parts = []
+            for field_name in tgt_field_order:
+                spec = FFL_SPEC.get(field_name, {})
+                width = spec.get("width", 10)
+                align = spec.get("align", "left")
+                raw = str(row.get(field_name) or {{ null_indicator | tojson }})
+                raw = raw[:width]  # truncate
+                if align == "right":
+                    line_parts.append(raw.rjust(width))
+                else:
+                    line_parts.append(raw.ljust(width))
+            f.write("".join(line_parts) + "\r\n")
+            count += 1
+    return count
+
+{% elif output_format == "csv" %}
+def write_csv(rows: list[dict], tgt_field_order: list[str], out_path: Path) -> int:
+    """Write rows as CSV."""
+    count = 0
+    with open(out_path, "w", encoding="{{ encoding }}", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=tgt_field_order, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+            count += 1
+    return count
+
+{% elif output_format == "json" %}
+def write_json(rows: list[dict], tgt_field_order: list[str], out_path: Path) -> int:
+    """Write rows as newline-delimited JSON."""
+    count = 0
+    with open(out_path, "w", encoding="{{ encoding }}") as f:
+        for row in rows:
+            f.write(json.dumps({k: row.get(k) for k in tgt_field_order}, default=str) + "\n")
+            count += 1
+    return count
+{% endif %}
+
+
+# ── Main ──────────────────────────────────────────────────────
+def main(output_dir: str = "output"):
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    conn = get_relius_connection()
+    total = 0
+
+    {% for table in tables %}
+    log.info("Extracting {{ table.name }}…")
+    rows_{{ table.name | lower }} = []
+    result = conn.execute(EXTRACT_QUERIES["{{ table.name }}"])
+    cols = list(result.keys())
+    for raw_row in result:
+        row_dict = dict(zip(cols, raw_row))
+        transformed = transform_row("{{ table.name }}", row_dict)
+        rows_{{ table.name | lower }}.append(transformed)
+
+    tgt_fields_{{ table.name | lower }} = {{ table.tgt_fields | tojson }}
+    {% if output_format == "fixed" %}
+    count = write_fixed_length(rows_{{ table.name | lower }}, tgt_fields_{{ table.name | lower }}, out_path / "{{ table.name }}.txt")
+    {% elif output_format == "csv" %}
+    count = write_csv(rows_{{ table.name | lower }}, tgt_fields_{{ table.name | lower }}, out_path / "{{ table.name }}.csv")
+    {% else %}
+    count = write_json(rows_{{ table.name | lower }}, tgt_fields_{{ table.name | lower }}, out_path / "{{ table.name }}.json")
+    {% endif %}
+    log.info(f"{{ table.name }}: {count} rows written")
+    total += count
+
+    {% endfor %}
+
+    log.info(f"Extract complete. Total rows: {total}")
+    return total
+
+
+if __name__ == "__main__":
+    output_dir = sys.argv[1] if len(sys.argv) > 1 else "output"
+    main(output_dir)

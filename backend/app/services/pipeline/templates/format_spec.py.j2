@@ -1,0 +1,44 @@
+# MigrateIQ — Fixed-Length Format Specification
+# Engagement : {{ engagement_id }}
+# Domain     : {{ domain_name }}
+# Generated  : {{ generated_at }}
+# Encoding   : {{ encoding }}
+# Line ending: CRLF (\r\n)
+#
+# Column definitions: NAME | START | END | WIDTH | TYPE | ALIGN | NULL_IND | DESCRIPTION
+# TYPE: AN=alphanumeric, N=numeric, D=date ({{ date_format }}), B=boolean
+# ──────────────────────────────────────────────────────────────────────────────
+
+FORMAT_VERSION = "1.0"
+ENGAGEMENT_ID  = "{{ engagement_id }}"
+DOMAIN         = "{{ domain_id }}"
+ENCODING       = "{{ encoding }}"
+NULL_INDICATOR = "{{ null_indicator }}"
+DATE_FORMAT    = "{{ date_format }}"
+
+{% for table in tables %}
+# ══ {{ table.name }} ══════════════════════════════════════════════════════════
+# Source table : {{ table.name }}
+# Total width  : {{ table.total_width }} characters per record
+# Record count : estimated {{ table.row_estimate or "unknown" }}
+
+{{ table.name | upper }}_SPEC = [
+    # ("tgt_field",         start,  end,   width, type, align, description)
+{% set ns = namespace(pos=1) %}
+{% for field in table.fields %}
+    ("{{ field.tgt_field | ljust(30) }}", {{ "%4d" | format(ns.pos) }}, {{ "%4d" | format(ns.pos + field.width - 1) }}, {{ "%3d" | format(field.width) }}, "{{ field.field_type }}", "{{ field.align }}", "{{ field.description | truncate(60, True, '...') }}"),
+{% set ns.pos = ns.pos + field.width %}
+{% endfor %}
+]
+# Record terminator: \r\n (not included in width count)
+
+{% endfor %}
+
+# ── Field width reference ─────────────────────────────────────
+# Frp standard widths (approximate — verify against FRP spec):
+#   CHAR(17)  participant ID  : 17
+#   VARCHAR   names           : 30
+#   DATE      dates           : 8  ({{ date_format }})
+#   DECIMAL   amounts         : 13  (right-aligned, 2dp, no decimal point)
+#   INTEGER   counters        : 10
+#   CHAR(1)   flags/codes     : 1–5
