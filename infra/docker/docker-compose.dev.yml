@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL with pgvector ──────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: migrateiq
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: migrateiq
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U migrateiq"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (session state) ─────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── MigrateIQ backend ─────────────────────────────────────
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://migrateiq:password@postgres:5432/migrateiq
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: development
+      APP_SECRET_KEY: dev-secret-key-change-in-production-32chars
+      APP_CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+    env_file:
+      - .env        # contains ANTHROPIC_API_KEY
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../../backend:/app    # hot reload in development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── MigrateIQ frontend ────────────────────────────────────
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: ../infra/docker/Dockerfile.frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    volumes:
+      - ../../frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  postgres_data:
