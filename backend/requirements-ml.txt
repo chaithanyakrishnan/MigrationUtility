@@ -1,0 +1,8 @@
+# MigrateIQ — ML/AI dependencies (optional)
+# Install: pip install -r requirements-ml.txt
+#
+# Skip if you want a fast setup. The app uses a hash-based fallback
+# embedder when these are absent — mapping quality will be lower.
+
+scikit-learn>=1.4.0
+sentence-transformers>=2.7.0

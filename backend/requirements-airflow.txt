@@ -1,0 +1,6 @@
+# MigrateIQ — Airflow (I1 orchestration)
+# Install in a SEPARATE venv — Airflow conflicts with core deps.
+# Recommended: use the official Docker image instead.
+#   docker pull apache/airflow:2.10.2-python3.12
+
+apache-airflow>=2.10.0
